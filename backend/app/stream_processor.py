@@ -210,7 +210,9 @@ def build_encoder_cmd(cfg: StreamConfig, overlay_active: bool = False) -> list[s
     """
     # timeout=60000000 (60 s) — give the ingest plenty of time to connect to the
     # upstream SRT/RTMP source and start flowing before the encoder gives up.
-    encoder_feed = f"udp://127.0.0.1:{cfg.encoder_feed_port}?fifo_size=1000000&overrun_nonfatal=1&timeout=60000000"
+    # fifo_size=5000000 (5 MB) — larger buffer to absorb ingest bursts without
+    # dropping frames; at 4 Mbps this is ~10 s of headroom.
+    encoder_feed = f"udp://127.0.0.1:{cfg.encoder_feed_port}?fifo_size=5000000&overrun_nonfatal=1&timeout=60000000"
 
     use_overlay = bool(cfg.overlay_path)
 
@@ -221,8 +223,7 @@ def build_encoder_cmd(cfg: StreamConfig, overlay_active: bool = False) -> list[s
             "-hide_banner", "-loglevel", "warning",
             "-progress", "pipe:2", "-stats_period", "1",
             "-fflags", "+nobuffer+genpts",
-            "-flush_packets", "1",
-            "-thread_queue_size", "1024",
+            "-thread_queue_size", "2048",
             "-i", encoder_feed,
             "-map", "0:v",
             "-map", "0:a?",
@@ -232,6 +233,8 @@ def build_encoder_cmd(cfg: StreamConfig, overlay_active: bool = False) -> list[s
             "-b:v", cfg.encoder_bitrate,
             "-g", str(cfg.encoder_gop),
             "-bf", "0",
+            "-threads", "0",
+            "-max_muxing_queue_size", "4096",
             "-c:a", cfg.audio_codec,
             "-b:a", cfg.audio_bitrate,
             "-f", cfg.output_format,
@@ -261,11 +264,10 @@ def build_encoder_cmd(cfg: StreamConfig, overlay_active: bool = False) -> list[s
         "-hide_banner", "-loglevel", "warning",
         "-progress", "pipe:2", "-stats_period", "1",
         "-fflags", "+nobuffer+genpts",
-        "-flush_packets", "1",
-        "-thread_queue_size", "1024",
+        "-thread_queue_size", "2048",
         "-i", encoder_feed,
         "-stream_loop", "-1",
-        "-thread_queue_size", "512",
+        "-thread_queue_size", "1024",
         "-i", cfg.overlay_path,
         "-filter_complex", filter_complex,
         "-map", "[vout]",
@@ -276,6 +278,8 @@ def build_encoder_cmd(cfg: StreamConfig, overlay_active: bool = False) -> list[s
         "-b:v", cfg.encoder_bitrate,
         "-g", str(cfg.encoder_gop),
         "-bf", "0",
+        "-threads", "0",
+        "-max_muxing_queue_size", "4096",
         "-c:a", cfg.audio_codec,
         "-b:a", cfg.audio_bitrate,
         "-f", cfg.output_format,
