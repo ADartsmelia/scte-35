@@ -254,11 +254,15 @@ def build_encoder_cmd(cfg: StreamConfig, overlay_enable_initial: int = 0) -> lis
     # separator, and URL escaping is broken across FFmpeg versions. So we omit
     # bind_address entirely and rely on the default port (5556). The overlay
     # controller connects to cfg.zmq_bind which must be tcp://127.0.0.1:5556.
+    # Overlay filter options are colon-separated. The comma after format=auto
+    # starts a new filter (zmq@zctl) in the same chain — it does NOT close the
+    # overlay option list. format=auto is an overlay option, so it must be
+    # separated from enable= with a colon, not a comma.
     overlay_filter = (
         f"[0:v][ovin]"
         f"overlay@ov="
         f"x={cfg.overlay_x}:y={cfg.overlay_y}:"
-        f"enable={overlay_enable_initial},"
+        f"enable={overlay_enable_initial}:"
         f"format=auto,"
         f"zmq@zctl"
         f"[vout]"
