@@ -227,6 +227,7 @@ def build_encoder_cmd(cfg: StreamConfig, overlay_active: bool = False) -> list[s
             "-i", encoder_feed,
             "-map", "0:v",
             "-map", "0:a?",
+            "-copyts",
             "-c:v", cfg.video_codec,
             "-preset", cfg.encoder_preset,
             "-tune", cfg.encoder_tune,
@@ -237,6 +238,12 @@ def build_encoder_cmd(cfg: StreamConfig, overlay_active: bool = False) -> list[s
             "-max_muxing_queue_size", "4096",
             "-c:a", cfg.audio_codec,
             "-b:a", cfg.audio_bitrate,
+            # initial_discontinuity sets the TS discontinuity_indicator bit on
+            # the first packets after each encoder start, which is the broadcast-
+            # standard signal for "new segment — reset continuity counter".
+            # This prevents VLC / downstream players from throwing decode errors
+            # when the encoder restarts for an overlay toggle.
+            "-mpegts_flags", "initial_discontinuity",
             "-f", cfg.output_format,
             cfg.output_url,
         ]
@@ -272,6 +279,7 @@ def build_encoder_cmd(cfg: StreamConfig, overlay_active: bool = False) -> list[s
         "-filter_complex", filter_complex,
         "-map", "[vout]",
         "-map", "0:a?",
+        "-copyts",
         "-c:v", cfg.video_codec,
         "-preset", cfg.encoder_preset,
         "-tune", cfg.encoder_tune,
@@ -282,6 +290,7 @@ def build_encoder_cmd(cfg: StreamConfig, overlay_active: bool = False) -> list[s
         "-max_muxing_queue_size", "4096",
         "-c:a", cfg.audio_codec,
         "-b:a", cfg.audio_bitrate,
+        "-mpegts_flags", "initial_discontinuity",
         "-f", cfg.output_format,
         cfg.output_url,
     ]
