@@ -212,8 +212,10 @@ def build_encoder_cmd(cfg: StreamConfig, overlay_enable_initial: int = 0) -> lis
       * Filter name labeling (`@ov`) lets us address it by `ov` in zmq commands
         instead of guessing `Parsed_overlay_0`.
     """
-    # timeout=5000000 (5 s) ensures the encoder doesn't block forever if the ingest feed drops.
-    encoder_feed = f"udp://127.0.0.1:{cfg.encoder_feed_port}?fifo_size=1000000&overrun_nonfatal=1&timeout=5000000"
+    # timeout=60000000 (60 s) — give the ingest plenty of time to connect to the
+    # upstream SRT/RTMP source and start flowing before the encoder gives up.
+    # On a live 24/7 feed the ingest may take 10–30 s to reconnect after a blip.
+    encoder_feed = f"udp://127.0.0.1:{cfg.encoder_feed_port}?fifo_size=1000000&overrun_nonfatal=1&timeout=60000000"
 
     use_overlay = bool(cfg.overlay_path)
 
