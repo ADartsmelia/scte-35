@@ -315,6 +315,9 @@ class StreamSession:
         self._overlay_active = active
         log.info("Restarting encoder with overlay_active=%s", active)
         await self.encoder.stop()
+        # Brief pause lets the UDP FIFO drain so the restarted encoder doesn't
+        # race against stale buffered packets and report an inflated latency.
+        await asyncio.sleep(1.0)
         await self.encoder.start()
 
     def status(self) -> dict:
@@ -325,10 +328,15 @@ class StreamSession:
         ing_us = self.ingest.last_out_time_us
         enc_us = self.encoder.last_out_time_us
         if ing_us > 0 and enc_us > 0:
-            diff = ing_us - enc_us
-            # Guard against transient negative values (encoder briefly ahead due
-            # to B-frame reordering or clock skew between progress reports).
-            latency_ms = max(0, diff // 1000)
+            # Suppress the metric for ~15 s after each encoder restart.
+            # Right after a restart, enc_us resets to 0 and climbs slowly while
+            # ing_us is already far ahead, producing a spuriously large latency.
+            enc_age = time.time() - self.encoder._last_start
+            if enc_age > 15.0:
+                diff = ing_us - enc_us
+                # Guard against transient negative values (encoder briefly ahead due
+                # to B-frame reordering or clock skew between progress reports).
+                latency_ms = max(0, diff // 1000)
 
         return {
             "ingest": {

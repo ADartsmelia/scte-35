@@ -62,7 +62,7 @@ const DEFAULTS = {
   overlay_x: 50, overlay_y: 50,
   overlay_w: "", overlay_h: "",
   overlay_duration_ms: "",
-  overlay_mode: "zmq",
+  overlay_mode: "restart",
   encoder_preset: "veryfast",
   encoder_bitrate: "4M",
   triggered_segmentation_types: [0x22, 0x30, 0x32, 0x34, 0x36],
@@ -243,7 +243,7 @@ function StatCard({ icon, title, value, sub, state = "neutral", children }) {
 }
 
 // ─── Manual ad break panel ─────────────────────────────────────────────────
-function ManualAdBreak({ running, overlayMode }) {
+function ManualAdBreak({ running }) {
   const [duration, setDuration] = useState(15);
   const [active,   setActive]   = useState(false);
   const [toast,    setToast]     = useState(null);
@@ -577,17 +577,6 @@ function AdvancedForm({ form, setForm }) {
               onChange={e => update("overlay_duration_ms", e.target.value)}
               placeholder="auto — uses the ad marker's built-in duration" />
           </Field>
-          <Field label="Overlay switch mode">
-            <select value={form.overlay_mode}
-              onChange={e => update("overlay_mode", e.target.value)}>
-              <option value="zmq">Instant (recommended)</option>
-              <option value="restart">Restart encoder (adds 1–3 second gap)</option>
-            </select>
-            <span className="field-hint">
-              "Instant" switches the overlay with zero interruption.
-              "Restart" rebuilds the video encoder, causing a brief stream freeze.
-            </span>
-          </Field>
         </div>
       </div>
 
@@ -870,18 +859,12 @@ export default function App() {
     finally { setBusy(false); }
   };
 
-  const sendZmq = async (cmd) => {
+  const stopOverlay = async () => {
     try {
-      const r = await fetch(`${API}/api/zmq`, {
-        method:"POST",
-        headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({ command: cmd }),
-      });
-      if (!r.ok) throw new Error(await r.text());
-      setToast({ tone:"ok",
-        text: cmd.includes(" 1") ? "Overlay is now ON" : "Overlay is now OFF" });
+      await fetch(`${API}/api/ad/stop`, { method:"POST" });
+      setToast({ tone:"ok", text:"Overlay stopped" });
     } catch(e) {
-      setToast({ tone:"err", text:`Overlay control failed: ${e.message}` });
+      setToast({ tone:"err", text:`Failed to stop overlay: ${e.message}` });
     }
   };
 
@@ -1075,7 +1058,7 @@ export default function App() {
                   </div>
                 </div>
                 <button className="btn btn-sm"
-                  onClick={() => sendZmq("ov enable 0")}
+                  onClick={stopOverlay}
                   style={{flexShrink:0}}>
                   Turn off overlay
                 </button>
@@ -1096,7 +1079,7 @@ export default function App() {
               <div style={{display:"flex", flexDirection:"column", gap:14}}>
 
                 {/* Manual ad break insertion */}
-                <ManualAdBreak running={running} overlayMode={form.overlay_mode} />
+                <ManualAdBreak running={running} />
 
                 {/* System health */}
                 <div className="card" style={{padding:20}}>
@@ -1112,8 +1095,8 @@ export default function App() {
                         ? `Found (${status.detector.scte_pid})`
                         : "Searching…"} />
                     <HealthRow label="Overlay mode"
-                      ok={form.overlay_mode === "zmq"}
-                      note={form.overlay_mode === "zmq" ? "Instant" : "Restart"} />
+                      ok={true}
+                      note="Encoder restart" />
                   </div>
                 </div>
 
