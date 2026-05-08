@@ -200,27 +200,22 @@ def build_ingest_cmd(cfg: StreamConfig) -> list[str]:
     ]
 
 
-def build_encoder_cmd(cfg: StreamConfig, overlay_enable_initial: int = 0) -> list[str]:
+def build_encoder_cmd(cfg: StreamConfig, overlay_active: bool = False) -> list[str]:
     """
-    Encoder reads the local TS feed, applies overlay filter (controlled by zmq),
-    and writes to the configured output.
+    Encoder reads the local TS feed, optionally composites the overlay, and
+    writes to the configured output.
 
-    Filter graph notes:
-      * `[1:v]format=rgba` ensures alpha is honored.
-      * `overlay=...:enable=...` is the gate. We bind it via `,zmq=...` so that
-        the overlay filter parameters (enable, x, y) can be changed at runtime.
-      * Filter name labeling (`@ov`) lets us address it by `ov` in zmq commands
-        instead of guessing `Parsed_overlay_0`.
+    Overlay is controlled by restarting the encoder with overlay_active=True/False.
+    No ZMQ required — the enable expression is baked in at start time.
     """
     # timeout=60000000 (60 s) — give the ingest plenty of time to connect to the
     # upstream SRT/RTMP source and start flowing before the encoder gives up.
-    # On a live 24/7 feed the ingest may take 10–30 s to reconnect after a blip.
     encoder_feed = f"udp://127.0.0.1:{cfg.encoder_feed_port}?fifo_size=1000000&overrun_nonfatal=1&timeout=60000000"
 
     use_overlay = bool(cfg.overlay_path)
 
     # ── No-overlay path: simple re-encode, no filter graph at all ────────────
-    if not use_overlay:
+    if not use_overlay or not overlay_active:
         cmd = [
             "ffmpeg",
             "-hide_banner", "-loglevel", "warning",
@@ -244,44 +239,28 @@ def build_encoder_cmd(cfg: StreamConfig, overlay_enable_initial: int = 0) -> lis
         ]
         return cmd
 
-    # ── Overlay path: full ZMQ-controlled filter graph ────────────────────────
+    # ── Overlay path: overlay always visible (enable=1) ───────────────────────
+    # Called only when overlay_active=True. The controller restarts the encoder
+    # with overlay_active=False when the break ends — no ZMQ needed.
     scale = ""
     if cfg.overlay_w or cfg.overlay_h:
         w = cfg.overlay_w or -1
         h = cfg.overlay_h or -1
         scale = f"scale={w}:{h},"
 
-    # FFmpeg's zmq filter binds on tcp://*:5556 by default. Passing bind_address
-    # explicitly is unreliable — the filter-graph parser treats ':' as an option
-    # separator, and URL escaping is broken across FFmpeg versions. So we omit
-    # bind_address entirely and rely on the default port (5556). The overlay
-    # controller connects to cfg.zmq_bind which must be tcp://127.0.0.1:5556.
-    # Overlay filter options are colon-separated. The comma after format=auto
-    # starts a new filter (zmq@zctl) in the same chain — it does NOT close the
-    # overlay option list. format=auto is an overlay option, so it must be
-    # separated from enable= with a colon, not a comma.
-    overlay_filter = (
-        f"[0:v][ovin]"
-        f"overlay@ov="
-        f"x={cfg.overlay_x}:y={cfg.overlay_y}:"
-        f"enable={overlay_enable_initial}:"
-        f"format=auto,"
-        f"zmq@zctl"
-        f"[vout]"
-    )
-
     filter_complex = (
         f"[1:v]{scale}format=rgba,setpts=PTS-STARTPTS[ovin];"
-        f"{overlay_filter}"
+        f"[0:v][ovin]overlay="
+        f"x={cfg.overlay_x}:y={cfg.overlay_y}:"
+        f"format=auto"
+        f"[vout]"
     )
 
     cmd = [
         "ffmpeg",
         "-hide_banner", "-loglevel", "warning",
-        # Structured progress to stderr every 1 s — parsed for latency tracking
         "-progress", "pipe:2", "-stats_period", "1",
         "-fflags", "+nobuffer+genpts",
-        # Flush output packets immediately — critical for low-latency SRT/UDP
         "-flush_packets", "1",
         "-thread_queue_size", "1024",
         "-i", encoder_feed,
@@ -296,9 +275,6 @@ def build_encoder_cmd(cfg: StreamConfig, overlay_enable_initial: int = 0) -> lis
         "-tune", cfg.encoder_tune,
         "-b:v", cfg.encoder_bitrate,
         "-g", str(cfg.encoder_gop),
-        # Disable B-frames: reduces encoder lookahead latency by ~1–2 frames.
-        # zerolatency tune already sets this for libx264, but be explicit so
-        # other codecs (libx265, etc.) also benefit.
         "-bf", "0",
         "-c:a", cfg.audio_codec,
         "-b:a", cfg.audio_bitrate,
@@ -318,7 +294,10 @@ class StreamSession:
     def __init__(self, cfg: StreamConfig):
         self.cfg = cfg
         self.ingest = FFmpegSupervisor("ingest", lambda: build_ingest_cmd(cfg))
-        self.encoder = FFmpegSupervisor("encoder", lambda: build_encoder_cmd(cfg))
+        self._overlay_active = False
+        self.encoder = FFmpegSupervisor(
+            "encoder", lambda: build_encoder_cmd(cfg, overlay_active=self._overlay_active)
+        )
 
     async def start(self) -> None:
         await self.ingest.start()
@@ -328,6 +307,15 @@ class StreamSession:
 
     async def stop(self) -> None:
         await asyncio.gather(self.encoder.stop(), self.ingest.stop(), return_exceptions=True)
+
+    async def set_overlay(self, active: bool) -> None:
+        """Restart the encoder with overlay on or off. ~1 s interruption."""
+        if self._overlay_active == active:
+            return
+        self._overlay_active = active
+        log.info("Restarting encoder with overlay_active=%s", active)
+        await self.encoder.stop()
+        await self.encoder.start()
 
     def status(self) -> dict:
         # Compute pipeline latency: how far behind the encoder is versus the

@@ -93,9 +93,11 @@ class App:
         self.session = StreamSession(cfg)
         await self.session.start()
 
-        # 3) Wire up controller (after encoder is up so zmq has a peer)
-        await asyncio.sleep(0.5)
-        self.controller = OverlayController(cfg)
+        # 3) Wire up overlay controller with a callback to restart the encoder
+        self.controller = OverlayController(
+            cfg,
+            set_overlay_cb=self.session.set_overlay,
+        )
 
         # 4) Consumer loop: detector queue -> controller -> store -> ws broadcast
         self._consumer_task = asyncio.create_task(self._consume_events(), name="consumer")

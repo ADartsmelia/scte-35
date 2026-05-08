@@ -42,9 +42,6 @@ class StreamConfig:
     audio_codec: str = "aac"
     audio_bitrate: str = "128k"
 
-    # Overlay control mode: "zmq" (production) or "restart" (MVP)
-    overlay_mode: str = "zmq"
-    zmq_bind: str = "tcp://127.0.0.1:5555"
 
 
 @dataclass
