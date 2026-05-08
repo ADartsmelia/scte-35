@@ -171,6 +171,27 @@ class OverlayController:
     # ZMQ I/O
     # -------------------------------------------------------------------------
 
+    def _zmq_reconnect(self) -> None:
+        """Close and reopen the REQ socket. Called after any send/recv failure.
+
+        A ZMQ REQ socket enforces strict send→recv alternation (EFSM state
+        machine). If recv times out the socket is left in a 'must-recv' state
+        and the next send raises EFSM. The only recovery is close + reconnect.
+        """
+        if self._zmq_ctx is None:
+            return
+        try:
+            if self._zmq_sock is not None:
+                self._zmq_sock.close(linger=0)
+        except Exception:
+            pass
+        self._zmq_sock = self._zmq_ctx.socket(zmq.REQ)
+        self._zmq_sock.connect(self.cfg.zmq_bind)
+        self._zmq_sock.setsockopt(zmq.RCVTIMEO, 500)
+        self._zmq_sock.setsockopt(zmq.SNDTIMEO, 500)
+        self._zmq_sock.setsockopt(zmq.LINGER, 0)
+        log.debug("ZMQ socket reconnected to %s", self.cfg.zmq_bind)
+
     async def _zmq_send(self, filter_name: str, option: str, value: str) -> None:
         if self._zmq_sock is None:
             return
@@ -184,6 +205,8 @@ class OverlayController:
                 log.debug("ZMQ overlay command ok: %s", msg)
         except Exception as e:
             log.warning("ZMQ send failed: %s (%s)", msg, e)
+            # Reconnect so the next command starts with a clean socket state.
+            self._zmq_reconnect()
 
     @property
     def active(self) -> bool:
