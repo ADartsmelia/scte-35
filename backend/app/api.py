@@ -31,14 +31,9 @@ class StartRequest(BaseModel):
     overlay_w: Optional[int] = None
     overlay_h: Optional[int] = None
     overlay_duration_ms: Optional[int] = None
-    overlay_mode: str = "zmq"
     triggered_segmentation_types: Optional[list[int]] = None
     encoder_preset: str = "veryfast"
     encoder_bitrate: str = "4M"
-
-
-class ZmqRequest(BaseModel):
-    command: str  # e.g. "ov enable 1"
 
 
 class AdBreakRequest(BaseModel):
@@ -72,7 +67,6 @@ class App:
             overlay_w=req.overlay_w,
             overlay_h=req.overlay_h,
             overlay_duration_ms=req.overlay_duration_ms,
-            overlay_mode=req.overlay_mode,
             encoder_preset=req.encoder_preset,
             encoder_bitrate=req.encoder_bitrate,
         )
@@ -201,30 +195,6 @@ def make_router(app_state: App) -> APIRouter:
     async def clear_markers():
         app_state.store.clear()
         return {"ok": True}
-
-    @r.post("/api/zmq")
-    async def zmq_send(req: ZmqRequest):
-        """Manual ZMQ command pass-through for the dashboard 'force overlay' buttons.
-
-        Accepts e.g. 'ov enable 1', 'ov x 100'. Returns the FFmpeg zmq filter reply.
-        """
-        if app_state.controller is None:
-            raise HTTPException(409, "pipeline not running")
-        if app_state.controller.cfg.overlay_mode != "zmq":
-            raise HTTPException(400, "overlay_mode is not 'zmq'")
-        parts = req.command.strip().split(None, 2)
-        if len(parts) != 3:
-            raise HTTPException(400, "command must be: '<filter> <option> <value>'")
-        filt, opt, val = parts
-        try:
-            await app_state.controller._zmq_send(filt, opt, val)
-            # Reflect the active state if it's the enable toggle
-            if filt == "ov" and opt == "enable":
-                app_state.controller._active = (val.strip() == "1")
-                app_state.state.overlay_active = app_state.controller._active
-            return {"ok": True, "command": req.command}
-        except Exception as e:
-            raise HTTPException(500, f"zmq send failed: {e}")
 
     @r.post("/api/ad/start")
     async def ad_start(req: AdBreakRequest):
