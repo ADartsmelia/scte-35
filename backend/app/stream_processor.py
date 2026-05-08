@@ -249,11 +249,11 @@ def build_encoder_cmd(cfg: StreamConfig, overlay_enable_initial: int = 0) -> lis
         h = cfg.overlay_h or -1
         scale = f"scale={w}:{h},"
 
-    # In FFmpeg's filter graph syntax ':' is the option separator, so any ':'
-    # inside an option *value* (e.g. the port in tcp://host:port) must be
-    # escaped as '\:'.  Without this the parser sees "tcp" as the option name
-    # and "//127.0.0.1" as the next token and dies with "No option name near".
-    zmq_bind_escaped = cfg.zmq_bind.replace(":", "\\:")
+    # In FFmpeg's filter graph syntax ':' is the option separator. Wrapping the
+    # bind address in single quotes tells the filter graph parser to treat it as
+    # a literal string, so 'tcp://127.0.0.1:5555' passes through correctly on
+    # all FFmpeg versions (backslash escaping is version-dependent).
+    zmq_bind_quoted = f"'{cfg.zmq_bind}'"
 
     overlay_filter = (
         f"[0:v][ovin]"
@@ -261,7 +261,7 @@ def build_encoder_cmd(cfg: StreamConfig, overlay_enable_initial: int = 0) -> lis
         f"x={cfg.overlay_x}:y={cfg.overlay_y}:"
         f"enable={overlay_enable_initial},"
         f"format=auto,"
-        f"zmq@zctl=bind_address={zmq_bind_escaped}"
+        f"zmq@zctl=bind_address={zmq_bind_quoted}"
         f"[vout]"
     )
 
