@@ -44,7 +44,7 @@ class StreamConfig:
 
     # Overlay control mode: "zmq" (production) or "restart" (MVP)
     overlay_mode: str = "zmq"
-    zmq_bind: str = "tcp://127.0.0.1:5555"
+    zmq_bind: str = "tcp://127.0.0.1:5556"
 
 
 @dataclass

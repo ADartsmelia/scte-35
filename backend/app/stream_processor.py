@@ -249,19 +249,18 @@ def build_encoder_cmd(cfg: StreamConfig, overlay_enable_initial: int = 0) -> lis
         h = cfg.overlay_h or -1
         scale = f"scale={w}:{h},"
 
-    # In FFmpeg's filter graph syntax ':' is the option separator. Wrapping the
-    # bind address in single quotes tells the filter graph parser to treat it as
-    # a literal string, so 'tcp://127.0.0.1:5555' passes through correctly on
-    # all FFmpeg versions (backslash escaping is version-dependent).
-    zmq_bind_quoted = f"'{cfg.zmq_bind}'"
-
+    # FFmpeg's zmq filter binds on tcp://*:5556 by default. Passing bind_address
+    # explicitly is unreliable — the filter-graph parser treats ':' as an option
+    # separator, and URL escaping is broken across FFmpeg versions. So we omit
+    # bind_address entirely and rely on the default port (5556). The overlay
+    # controller connects to cfg.zmq_bind which must be tcp://127.0.0.1:5556.
     overlay_filter = (
         f"[0:v][ovin]"
         f"overlay@ov="
         f"x={cfg.overlay_x}:y={cfg.overlay_y}:"
         f"enable={overlay_enable_initial},"
         f"format=auto,"
-        f"zmq@zctl=bind_address={zmq_bind_quoted}"
+        f"zmq@zctl"
         f"[vout]"
     )
 
