@@ -14,12 +14,13 @@ class MarkerStore:
         self._lock = threading.Lock()
         self._counter = 0
 
-    def add(self, event: dict, overlay_result: Optional[dict] = None) -> dict:
+    def add(self, event: dict, overlay_result: Optional[dict] = None, source: str = "auto") -> dict:
         with self._lock:
             self._counter += 1
             row = {
                 "id": self._counter,
                 "time": event.get("received_at") or time.time(),
+                "source": source,  # "auto" = SCTE-35 detected, "manual" = operator triggered
                 "splice_event_id": event.get("splice_event_id"),
                 "segmentation_event_id": event.get("segmentation_event_id"),
                 "segmentation_type_id": event.get("segmentation_type_id"),

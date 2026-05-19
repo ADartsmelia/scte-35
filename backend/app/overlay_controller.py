@@ -112,6 +112,10 @@ class OverlayController:
     async def _overlay_on(self, duration_ms: Optional[int]) -> None:
         if self._overlay_off_task and not self._overlay_off_task.done():
             self._overlay_off_task.cancel()
+            try:
+                await self._overlay_off_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
         if self.set_overlay_cb:
             await self.set_overlay_cb(True)
@@ -124,6 +128,8 @@ class OverlayController:
         if self.set_overlay_cb:
             await self.set_overlay_cb(False)
         self._active = False
+        # Allow the same event identity to re-trigger on the next ad break.
+        self._last_event_id = None
 
     async def _auto_off(self, duration_ms: int) -> None:
         try:
