@@ -26,6 +26,60 @@ import shlex
 import time
 from typing import Optional
 
+import sys
+
+# ZMQ helper runs in a child process to avoid fork-safety issues.
+# pyzmq contexts do not survive uvicorn's reloader fork cleanly, causing
+# spurious timeouts when the context is held across a fork boundary.
+_ZMQ_HELPER = """
+import sys, zmq
+port = int(sys.argv[1])
+cmd  = sys.argv[2]
+ctx  = zmq.Context()
+sock = ctx.socket(zmq.REQ)
+sock.setsockopt(zmq.LINGER, 0)
+sock.setsockopt(zmq.RCVTIMEO, 2000)
+sock.setsockopt(zmq.SNDTIMEO, 2000)
+sock.connect(f"tcp://127.0.0.1:{port}")
+try:
+    sock.send_string(cmd)
+    sock.recv_string()
+    sys.exit(0)
+except zmq.error.Again:
+    sys.exit(1)
+except Exception:
+    sys.exit(2)
+"""
+
+
+async def _zmq_overlay_cmd(port: int, active: bool) -> bool:
+    """Send 'overlay enable 1/0' to FFmpeg via a short-lived child process.
+
+    Spawning a subprocess avoids pyzmq fork-safety issues that arise when
+    uvicorn's reloader forks the server process and ZMQ internal threads
+    are left in an undefined state inside the forked worker.
+    """
+    cmd = f"overlay enable {'1' if active else '0'}"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", _ZMQ_HELPER, str(port), cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=3.0)
+        except asyncio.TimeoutError:
+            proc.kill()
+            log.warning("ZMQ overlay cmd timed out (port=%d)", port)
+            return False
+        rc = proc.returncode
+        if rc != 0:
+            log.warning("ZMQ overlay cmd rc=%d port=%d out=%r err=%r", rc, port, stdout, stderr)
+        return rc == 0
+    except Exception as e:
+        log.warning("ZMQ overlay cmd exception: %s: %s", type(e).__name__, e)
+        return False
+
 from .runtime_config import StreamConfig
 
 log = logging.getLogger(__name__)
@@ -205,20 +259,19 @@ def build_encoder_cmd(cfg: StreamConfig, overlay_active: bool = False) -> list[s
     Encoder reads the local TS feed, optionally composites the overlay, and
     writes to the configured output.
 
-    Overlay is controlled by restarting the encoder with overlay_active=True/False.
-    No ZMQ required — the enable expression is baked in at start time.
+    When overlay_path is set, the overlay and ZMQ filter are always included in
+    the graph. The overlay's enable expression is baked to the current
+    overlay_active value so crash-restarts self-heal without an extra ZMQ call.
+    Runtime toggling is done by sending 'overlay enable 1/0' via ZMQ — no
+    process restart needed.
     """
-    # timeout=60000000 (60 s) — give the ingest plenty of time to connect to the
-    # upstream SRT/RTMP source and start flowing before the encoder gives up.
-    # fifo_size=5000000 (5 MB) — larger buffer to absorb ingest bursts without
-    # dropping frames; at 4 Mbps this is ~10 s of headroom.
     encoder_feed = f"udp://127.0.0.1:{cfg.encoder_feed_port}?fifo_size=5000000&overrun_nonfatal=1&timeout=60000000"
 
     use_overlay = bool(cfg.overlay_path)
 
-    # ── No-overlay path: simple re-encode, no filter graph at all ────────────
-    if not use_overlay or not overlay_active:
-        cmd = [
+    # ── No-overlay path: simple re-encode, no filter graph ───────────────────
+    if not use_overlay:
+        return [
             "ffmpeg",
             "-hide_banner", "-loglevel", "warning",
             "-progress", "pipe:2", "-stats_period", "1",
@@ -237,35 +290,41 @@ def build_encoder_cmd(cfg: StreamConfig, overlay_active: bool = False) -> list[s
             "-max_muxing_queue_size", "4096",
             "-c:a", cfg.audio_codec,
             "-b:a", cfg.audio_bitrate,
-            # initial_discontinuity sets the TS discontinuity_indicator bit on
-            # the first packets after each encoder start, which is the broadcast-
-            # standard signal for "new segment — reset continuity counter".
-            # This prevents VLC / downstream players from throwing decode errors
-            # when the encoder restarts for an overlay toggle.
             "-mpegts_flags", "initial_discontinuity",
             "-f", cfg.output_format,
             cfg.output_url,
         ]
-        return cmd
 
-    # ── Overlay path: overlay always visible (enable=1) ───────────────────────
-    # Called only when overlay_active=True. The controller restarts the encoder
-    # with overlay_active=False when the break ends — no ZMQ needed.
+    # ── Overlay path: overlay + ZMQ control filter always in the graph ───────
+    # The enable expression is baked from overlay_active so that if the encoder
+    # crashes and auto-restarts, it comes back in the correct state without
+    # needing an extra ZMQ round-trip. Runtime toggling uses ZMQ (no restart).
     scale = ""
     if cfg.overlay_w or cfg.overlay_h:
         w = cfg.overlay_w or -1
         h = cfg.overlay_h or -1
         scale = f"scale={w}:{h},"
 
+    enable = "1" if overlay_active else "0"
+
+    # Use the zmq filter with no explicit bind_address so we avoid FFmpeg's
+    # colon-escaping rules entirely. The default is tcp://*:<port> where port
+    # is 5557. The Python client connects to tcp://127.0.0.1:5557.
+    # If cfg.zmq_port differs from 5557, pass it via the short "b" alias which
+    # only needs the port number — no colon in the scheme prefix to escape.
+    if cfg.zmq_port == 5557:
+        zmq_filter = "zmq"
+    else:
+        zmq_filter = f"zmq=bind_address=tcp\\\\://*\\\\:{cfg.zmq_port}"
+
     filter_complex = (
         f"[1:v]{scale}format=rgba,setpts=PTS-STARTPTS[ovin];"
-        f"[0:v][ovin]overlay="
-        f"x={cfg.overlay_x}:y={cfg.overlay_y}:"
-        f"format=auto"
-        f"[vout]"
+        f"[0:v][ovin]overlay=x={cfg.overlay_x}:y={cfg.overlay_y}:"
+        f"format=auto:enable='{enable}'[pre];"
+        f"[pre]{zmq_filter}[vout]"
     )
 
-    cmd = [
+    return [
         "ffmpeg",
         "-hide_banner", "-loglevel", "warning",
         "-progress", "pipe:2", "-stats_period", "1",
@@ -292,7 +351,6 @@ def build_encoder_cmd(cfg: StreamConfig, overlay_active: bool = False) -> list[s
         "-f", cfg.output_format,
         cfg.output_url,
     ]
-    return cmd
 
 
 # -----------------------------------------------------------------------------
@@ -306,6 +364,7 @@ class StreamSession:
         self.cfg = cfg
         self.ingest = FFmpegSupervisor("ingest", lambda: build_ingest_cmd(cfg))
         self._overlay_active = False
+        self._overlay_lock = asyncio.Lock()
         self.encoder = FFmpegSupervisor(
             "encoder", lambda: build_encoder_cmd(cfg, overlay_active=self._overlay_active)
         )
@@ -320,16 +379,34 @@ class StreamSession:
         await asyncio.gather(self.encoder.stop(), self.ingest.stop(), return_exceptions=True)
 
     async def set_overlay(self, active: bool) -> None:
-        """Restart the encoder with overlay on or off. ~1 s interruption."""
-        if self._overlay_active == active:
-            return
-        self._overlay_active = active
-        log.info("Restarting encoder with overlay_active=%s", active)
-        await self.encoder.stop()
-        # Brief pause lets the UDP FIFO drain so the restarted encoder doesn't
-        # race against stale buffered packets and report an inflated latency.
-        await asyncio.sleep(1.0)
-        await self.encoder.start()
+        """Toggle the overlay at runtime.
+
+        When overlay_path is configured, sends a ZMQ command to FFmpeg's zmq
+        filter — no process restart, no black frame, sub-millisecond toggle.
+        The lock serialises concurrent callers (auto-off + new trigger race).
+        Falls back to an encoder restart only if ZMQ fails after retries (e.g.
+        encoder is in the middle of restarting after a crash).
+        """
+        async with self._overlay_lock:
+            if self._overlay_active == active:
+                return
+            self._overlay_active = active
+
+            if self.cfg.overlay_path:
+                for attempt in range(3):
+                    if attempt:
+                        await asyncio.sleep(0.5)
+                    if await _zmq_overlay_cmd(self.cfg.zmq_port, active):
+                        log.info("Overlay toggled via ZMQ: active=%s", active)
+                        return
+                log.warning("ZMQ toggle failed after 3 attempts — falling back to encoder restart")
+
+            # Fallback (no overlay_path, or ZMQ unavailable): restart encoder.
+            # The new command has overlay_active baked in so it starts correctly.
+            log.info("Restarting encoder with overlay_active=%s", active)
+            await self.encoder.stop()
+            await asyncio.sleep(1.0)
+            await self.encoder.start()
 
     def status(self) -> dict:
         # Compute pipeline latency: how far behind the encoder is versus the

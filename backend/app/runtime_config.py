@@ -17,6 +17,7 @@ class StreamConfig:
     # Internal localhost fan-out (don't expose to UI unless you want to)
     encoder_feed_port: int = 5000   # full-TS feed for encoder
     detector_feed_port: int = 5001  # SCTE-only feed for detector
+    zmq_port: int = 5555            # ZMQ REP socket bound by FFmpeg's zmq filter (default)
 
     # Overlay
     overlay_path: str = ""
